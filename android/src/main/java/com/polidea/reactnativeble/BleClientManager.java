@@ -1,5 +1,7 @@
 package com.polidea.reactnativeble;
 
+import android.util.Log;
+
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -34,6 +36,7 @@ import com.polidea.reactnativeble.converter.ServiceToJsObjectConverter;
 import com.polidea.reactnativeble.utils.ReadableArrayConverter;
 import com.polidea.reactnativeble.utils.SafePromise;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +49,9 @@ public class BleClientManager extends ReactContextBaseJavaModule {
 
     // Name of module
     private static final String NAME = "BleClientManager";
+    private static final String DEVICE_INFO_SERVICE_UUID = "180A";
+    private static final String CONFIGURATION_SERVICE_UUID = "D23BF160-952D-43B9-8899-5AE73F3BABCE";
+    private static final String LOCKING_SERVICE_UUID = "c3761400-4218-4e19-97fd-6ae0b14e2755";
 
     // Value converters
     private final BleErrorToJsObjectConverter errorConverter = new BleErrorToJsObjectConverter();
@@ -81,17 +87,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
     public void createClient(String restoreStateIdentifier) {
         bleAdapter = BleAdapterFactory.getNewAdapter(getReactApplicationContext());
         bleAdapter.createClient(restoreStateIdentifier,
-                new OnEventCallback<String>() {
-                    @Override
-                    public void onEvent(String state) {
-                        sendEvent(Event.StateChangeEvent, state);
-                    }
-                }, new OnEventCallback<Integer>() {
-                    @Override
-                    public void onEvent(Integer data) {
-                        sendEvent(Event.RestoreStateEvent, null);
-                    }
-                });
+                state -> sendEvent(Event.StateChangeEvent, state),
+                data -> sendEvent(Event.RestoreStateEvent, null));
     }
 
     @ReactMethod
@@ -104,7 +101,22 @@ public class BleClientManager extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void cancelTransaction(String transactionId) {
-        bleAdapter.cancelTransaction(transactionId);
+        if (bleAdapter == null) {
+            return;
+        }
+
+        try {
+          bleAdapter.getConnectedDevices(
+                  new String[]{LOCKING_SERVICE_UUID, CONFIGURATION_SERVICE_UUID, DEVICE_INFO_SERVICE_UUID},
+                  devices -> {
+                      if (devices.length > 0) {
+                        bleAdapter.cancelTransaction(transactionId);
+                      }
+                  },
+                  (error) -> Log.e("BLE_TRANSATION_ERROR", error.getLocalizedMessage()));
+        } catch (Exception e) {
+          Log.d("BLE_ERR", "Error while cancelling transaction: " + e.getLocalizedMessage())
+        }
     }
 
     @ReactMethod
@@ -122,33 +134,17 @@ public class BleClientManager extends ReactContextBaseJavaModule {
     @ReactMethod
     public void enable(final String transactionId, final Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
-        bleAdapter.enable(transactionId, new OnSuccessCallback<Void>() {
-            @Override
-            public void onSuccess(Void data) {
-                safePromise.resolve(null);
-            }
-        }, new OnErrorCallback() {
-            @Override
-            public void onError(BleError error) {
-                safePromise.reject(null, errorConverter.toJs(error));
-            }
-        });
+        bleAdapter.enable(transactionId,
+                data -> safePromise.resolve(null),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
     public void disable(final String transactionId, final Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
-        bleAdapter.disable(transactionId, new OnSuccessCallback<Void>() {
-            @Override
-            public void onSuccess(Void data) {
-                safePromise.resolve(null);
-            }
-        }, new OnErrorCallback() {
-            @Override
-            public void onError(BleError error) {
-                safePromise.reject(null, errorConverter.toJs(error));
-            }
-        });
+        bleAdapter.disable(transactionId,
+                data -> safePromise.resolve(null),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
@@ -162,6 +158,7 @@ public class BleClientManager extends ReactContextBaseJavaModule {
     public void startDeviceScan(@Nullable ReadableArray filteredUUIDs, @Nullable ReadableMap options) {
         final int DEFAULT_SCAN_MODE_LOW_POWER = 0;
         final int DEFAULT_CALLBACK_TYPE_ALL_MATCHES = 1;
+        long timemillis = System.currentTimeMillis();
 
         int scanMode = DEFAULT_SCAN_MODE_LOW_POWER;
         int callbackType = DEFAULT_CALLBACK_TYPE_ALL_MATCHES;
@@ -178,17 +175,11 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         bleAdapter.startDeviceScan(
                 filteredUUIDs != null ? ReadableArrayConverter.toStringArray(filteredUUIDs) : null,
                 scanMode, callbackType,
-                new OnEventCallback<ScanResult>() {
-                    @Override
-                    public void onEvent(ScanResult data) {
-                        sendEvent(Event.ScanEvent, scanResultConverter.toJSCallback(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        sendEvent(Event.ScanEvent, errorConverter.toJSCallback(error));
-                    }
-                });
+                data -> {
+                  sendEvent(Event.ScanEvent, scanResultConverter.toJSCallback(data));
+                  Log.d("MICROMETER", "Time to complete startDeviceScan: " + (System.currentTimeMillis() - timemillis));
+                },
+                error -> sendEvent(Event.ScanEvent, errorConverter.toJSCallback(error)));
     }
 
     @ReactMethod
@@ -201,41 +192,27 @@ public class BleClientManager extends ReactContextBaseJavaModule {
     @ReactMethod
     public void devices(final ReadableArray deviceIdentifiers, final Promise promise) {
         bleAdapter.getKnownDevices(ReadableArrayConverter.toStringArray(deviceIdentifiers),
-                new OnSuccessCallback<Device[]>() {
-                    @Override
-                    public void onSuccess(Device[] data) {
+                data -> {
                         WritableArray jsDevices = Arguments.createArray();
                         for (Device device : data) {
                             jsDevices.pushMap(deviceConverter.toJSObject(device));
                         }
                         promise.resolve(jsDevices);
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        promise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                },
+                error -> promise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
     public void connectedDevices(final ReadableArray serviceUUIDs, final Promise promise) {
         bleAdapter.getConnectedDevices(ReadableArrayConverter.toStringArray(serviceUUIDs),
-                new OnSuccessCallback<Device[]>() {
-                    @Override
-                    public void onSuccess(Device[] data) {
+                data -> {
                         final WritableArray writableArray = Arguments.createArray();
                         for (Device device : data) {
                             writableArray.pushMap(deviceConverter.toJSObject(device));
                         }
                         promise.resolve(writableArray);
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        promise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                },
+                error -> promise.reject(null, errorConverter.toJs(error)));
     }
 
     // Mark: Device operations ---------------------------------------------------------------------
@@ -244,51 +221,24 @@ public class BleClientManager extends ReactContextBaseJavaModule {
     public void requestConnectionPriorityForDevice(final String deviceId, int connectionPriority, final String transactionId, final Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.requestConnectionPriorityForDevice(deviceId, connectionPriority, transactionId,
-                new OnSuccessCallback<Device>() {
-                    @Override
-                    public void onSuccess(Device data) {
-                        safePromise.resolve(deviceConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                data -> safePromise.resolve(deviceConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
     public void requestMTUForDevice(final String deviceId, int mtu, final String transactionId, final Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.requestMTUForDevice(deviceId, mtu, transactionId,
-                new OnSuccessCallback<Device>() {
-                    @Override
-                    public void onSuccess(Device data) {
-                        safePromise.resolve(deviceConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                data -> safePromise.resolve(deviceConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
     public void readRSSIForDevice(final String deviceId, final String transactionId, final Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.readRSSIForDevice(deviceId, transactionId,
-                new OnSuccessCallback<Device>() {
-                    @Override
-                    public void onSuccess(Device data) {
-                        safePromise.resolve(deviceConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                data -> safePromise.resolve(deviceConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
@@ -325,15 +275,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                         refreshGattMoment,
                         timeout != null ? timeout.longValue() : null,
                         connectionPriority),
-                new OnSuccessCallback<Device>() {
-                    @Override
-                    public void onSuccess(Device data) {
-                        safePromise.resolve(deviceConverter.toJSObject(data));
-                    }
-                },
-                new OnEventCallback<ConnectionState>() {
-                    @Override
-                    public void onEvent(ConnectionState connectionState) {
+                data -> safePromise.resolve(deviceConverter.toJSObject(data)),
+                connectionState -> {
                         if (connectionState == ConnectionState.DISCONNECTED) {
                             WritableArray event = Arguments.createArray();
                             event.pushNull();
@@ -342,47 +285,23 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                             event.pushMap(device);
                             sendEvent(Event.DisconnectionEvent, event);
                         }
-                    }
                 },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
     public void cancelDeviceConnection(String deviceId, Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.cancelDeviceConnection(deviceId,
-                new OnSuccessCallback<Device>() {
-                    @Override
-                    public void onSuccess(Device data) {
-                        safePromise.resolve(deviceConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                data -> safePromise.resolve(deviceConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
     public void isDeviceConnected(String deviceId, final Promise promise) {
         bleAdapter.isDeviceConnected(deviceId,
-                new OnSuccessCallback<Boolean>() {
-                    @Override
-                    public void onSuccess(Boolean isConnected) {
-                        promise.resolve(isConnected);
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        promise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                promise::resolve,
+                error -> promise.reject(null, errorConverter.toJs(error)));
     }
 
     // Mark: Discovery -----------------------------------------------------------------------------
@@ -391,17 +310,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
     public void discoverAllServicesAndCharacteristicsForDevice(String deviceId, final String transactionId, final Promise promise) {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.discoverAllServicesAndCharacteristicsForDevice(deviceId, transactionId,
-                new OnSuccessCallback<Device>() {
-                    @Override
-                    public void onSuccess(Device data) {
-                        safePromise.resolve(deviceConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                data -> safePromise.resolve(deviceConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     // Mark: Service and characteristic getters ----------------------------------------------------
@@ -514,17 +424,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
 
         bleAdapter.writeCharacteristicForDevice(
                 deviceId, serviceUUID, characteristicUUID, valueBase64, response, transactionId,
-                new OnSuccessCallback<Characteristic>() {
-                    @Override
-                    public void onSuccess(Characteristic data) {
-                        safePromise.resolve(characteristicConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                data -> safePromise.resolve(characteristicConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -538,17 +439,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.writeCharacteristicForService(
                 serviceIdentifier, characteristicUUID, valueBase64, response, transactionId,
-                new OnSuccessCallback<Characteristic>() {
-                    @Override
-                    public void onSuccess(Characteristic data) {
-                        safePromise.resolve(characteristicConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                data -> safePromise.resolve(characteristicConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -561,17 +453,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         final SafePromise safePromise = new SafePromise(promise);
 
         bleAdapter.writeCharacteristic(characteristicIdentifier, valueBase64, response, transactionId,
-                new OnSuccessCallback<Characteristic>() {
-                    @Override
-                    public void onSuccess(Characteristic data) {
-                        safePromise.resolve(characteristicConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                });
+                data -> safePromise.resolve(characteristicConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error)));
     }
 
     @ReactMethod
@@ -584,17 +467,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
 
         bleAdapter.readCharacteristicForDevice(
                 deviceId, serviceUUID, characteristicUUID, transactionId,
-                new OnSuccessCallback<Characteristic>() {
-                    @Override
-                    public void onSuccess(Characteristic data) {
-                        safePromise.resolve(characteristicConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                data -> safePromise.resolve(characteristicConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -607,17 +481,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
 
         bleAdapter.readCharacteristicForService(
                 serviceIdentifier, characteristicUUID, transactionId,
-                new OnSuccessCallback<Characteristic>() {
-                    @Override
-                    public void onSuccess(Characteristic data) {
-                        safePromise.resolve(characteristicConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                data -> safePromise.resolve(characteristicConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -629,17 +494,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
 
         bleAdapter.readCharacteristic(
                 characteristicIdentifier, transactionId,
-                new OnSuccessCallback<Characteristic>() {
-                    @Override
-                    public void onSuccess(Characteristic data) {
-                        safePromise.resolve(characteristicConverter.toJSObject(data));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                data -> safePromise.resolve(characteristicConverter.toJSObject(data)),
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -652,21 +508,14 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.monitorCharacteristicForDevice(
                 deviceId, serviceUUID, characteristicUUID, transactionId,
-                new OnEventCallback<Characteristic>() {
-                    @Override
-                    public void onEvent(Characteristic data) {
+                data -> {
                         WritableArray jsResult = Arguments.createArray();
                         jsResult.pushNull();
                         jsResult.pushMap(characteristicConverter.toJSObject(data));
                         jsResult.pushString(transactionId);
                         sendEvent(Event.ReadEvent, jsResult);
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                },
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -678,21 +527,14 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         final SafePromise safePromise = new SafePromise(promise);
         bleAdapter.monitorCharacteristicForService(
                 serviceIdentifier, characteristicUUID, transactionId,
-                new OnEventCallback<Characteristic>() {
-                    @Override
-                    public void onEvent(Characteristic data) {
+                data -> {
                         WritableArray jsResult = Arguments.createArray();
                         jsResult.pushNull();
                         jsResult.pushMap(characteristicConverter.toJSObject(data));
                         jsResult.pushString(transactionId);
                         sendEvent(Event.ReadEvent, jsResult);
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                },
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -704,21 +546,14 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         //TODO resolve safePromise with null when monitoring has been completed
         bleAdapter.monitorCharacteristic(
                 characteristicIdentifier, transactionId,
-                new OnEventCallback<Characteristic>() {
-                    @Override
-                    public void onEvent(Characteristic data) {
+                data -> {
                         WritableArray jsResult = Arguments.createArray();
                         jsResult.pushNull();
                         jsResult.pushMap(characteristicConverter.toJSObject(data));
                         jsResult.pushString(transactionId);
                         sendEvent(Event.ReadEvent, jsResult);
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError error) {
-                        safePromise.reject(null, errorConverter.toJs(error));
-                    }
-                }
+                },
+                error -> safePromise.reject(null, errorConverter.toJs(error))
         );
     }
 
@@ -735,17 +570,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 characteristicUUID,
                 descriptorUUID,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                }, new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                });
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError)));
     }
 
     @ReactMethod
@@ -759,18 +585,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 characteristicUUID,
                 descriptorUUID,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                });
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError)));
     }
 
     @ReactMethod
@@ -782,18 +598,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 characteristicIdentifier,
                 descriptorUUID,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                });
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError)));
     }
 
     @ReactMethod
@@ -803,18 +609,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
         bleAdapter.readDescriptor(
                 descriptorIdentifier,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                });
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError)));
     }
 
     @ReactMethod
@@ -832,18 +628,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 descriptorUUID,
                 valueBase64,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                }
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError))
         );
     }
 
@@ -860,18 +646,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 descriptorUUID,
                 valueBase64,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                }
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError))
         );
     }
 
@@ -886,18 +662,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 descriptorUUID,
                 valueBase64,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                }
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError))
         );
     }
 
@@ -910,18 +676,8 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                 descriptorIdentifier,
                 valueBase64,
                 transactionId,
-                new OnSuccessCallback<Descriptor>() {
-                    @Override
-                    public void onSuccess(Descriptor descriptor) {
-                        promise.resolve(descriptorConverter.toJSObject(descriptor));
-                    }
-                },
-                new OnErrorCallback() {
-                    @Override
-                    public void onError(BleError bleError) {
-                        promise.reject(null, errorConverter.toJs(bleError));
-                    }
-                }
+                descriptor -> promise.resolve(descriptorConverter.toJSObject(descriptor)),
+                bleError -> promise.reject(null, errorConverter.toJs(bleError))
         );
     }
 
