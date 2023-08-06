@@ -115,7 +115,7 @@ public class BleClientManager extends ReactContextBaseJavaModule {
                   },
                   (error) -> Log.e("BLE_TRANSATION_ERROR", error.getLocalizedMessage()));
         } catch (Exception e) {
-          Log.d("BLE_ERR", "Error while cancelling transaction: " + e.getLocalizedMessage())
+          Log.d("BLE_ERR", "Error while cancelling transaction: " + e.getLocalizedMessage());
         }
     }
 
